@@ -1,5 +1,8 @@
 import scipy.io as sio
 import numpy as np
+from PIL import Image
+
+
 data1=sio.loadmat('data1.mat')['final_1'][0:100]
 data2=sio.loadmat('data2.mat')['final_2'][0:100]
 data3=sio.loadmat('data3.mat')['final_3'][0:100]
@@ -60,6 +63,26 @@ batch_size = 50
 nb_classes = 3
 nb_epoch = 5
 
+import scipy.ndimage as ndimage
+def upsample(X,d):
+    XX = np.zeros((X.shape[0],X.shape[1],d*X.shape[2],d*X.shape[3]))
+    for i,xi in enumerate(X):
+        for j,xij in enumerate(xi):
+            tmp = (ndimage.zoom(xij, d))
+            XX[i,j,:,:] = tmp
+    return np.float32(XX)
+
+from theano.sandbox.cuda.dnn import dnn_conv
+def deconv(W0, W1):
+    print(W0.shape)
+    print(W1.shape)
+    filter_size = W0.shape[2:4]
+    num_filter = W0.shape[0]
+    num_ch = W1.shape[0]
+    W1_layer0 = dnn_conv(img=W1, kerns=W0.transpose(1, 0, 2, 3), border_mode='valid', subsample=(1, 1))
+    W1_layer0 = np.asarray(W1_layer0.eval())
+    print(W1_layer0.shape)
+    return W1_layer0
 
 def compute_padding_length(length_before, stride, length_conv):
     ''' Assumption: you want the subsampled result has a length of floor(original_length/stride).
@@ -141,19 +164,9 @@ def design_for_residual_blocks(num_channel_input=1):
 def get_residual_model(is_mnist=True, img_channels=1, img_rows=28, img_cols=28):
     model = keras.models.Sequential()
     first_layer_channel = 1
-    # if is_mnist:  # size to be changed to 32,32
-    #     model.add
-    # (ZeroPadding2D((2, 2), input_shape=(img_channels, img_rows, img_cols)))  # resize (28,28)-->(32,32)
-    #     # the first conv
-    #     model.add(Convolution2D(first_layer_channel, 3, 3, border_mode='same'))
-    # else:
-    #     model.add(Convolution2D(first_layer_channel, 3, 3, border_mode='same',
-    #                             input_shape=(img_channels, img_rows, img_cols)))
-
-    # model.add(Activation('relu'))
-    # [residual-based Conv layers]
-    residual_blocks = design_for_residual_blocks(num_channel_input=first_layer_channel)
-    model.add(residual_blocks)
+    model.add(Convolution2D(20, 5, 5, border_mode='same', subsample=(2,2), input_shape=(img_channels, img_rows, img_cols)))
+    model.add(Activation('relu'))
+    model.add(Convolution2D(50, 5, 5, border_mode='same', subsample=(2,2)))
     model.add(BatchNormalization(axis=1))
     model.add(Activation('relu'))
     # [Classifier]
@@ -212,5 +225,35 @@ if __name__ == '__main__':
     model.fit(X_train, Y_train, batch_size=batch_size, nb_epoch=nb_epoch,
               verbose=1, validation_data=(X_test, Y_test))  # , callbacks=[best_model])
     score = model.evaluate(X_test, Y_test, show_accuracy=True, verbose=0)
+
+
+
+    W0 = np.array(model.layers[0].W.dimshuffle((3,2,0,1)))
+    W1 = np.array(model.layers[2].W.dimshuffle((3,2,0,1)))
+    W1 = upsample(W1, 2)
+    W1_layer0 = deconv(W0, W1)
+    rows = 1
+    cols = 2
+    height, width = (W1_layer0.shape[2], W1_layer0.shape[3])
+    N = 2
+    total_height = rows * height + (rows-1)
+    total_width  = cols * width + (cols-1)
+    arr = W1_layer0
+    arr = arr - arr.min()
+    scale = (arr.max() - arr.min())
+    arr = arr / scale
+    I = np.zeros((3, total_height, total_width))# highlight writing window
+    I.fill(1)
+    for i in xrange(N):
+        r = i // cols
+        c = i % cols
+        this = (255*arr[i]).astype(np.uint8)
+        offset_y, offset_x = r*height+r, c*width+c
+        I[:, offset_y:(offset_y+height), offset_x:(offset_x+width)] = this.reshape(1,height,width)
+    out = np.dstack(I).astype(np.uint8)
+    img = Image.fromarray(out)
+    img.save("/debug.png")
+
+
     print('Test score:', score[0])
     print('Test accuracy:', score[1])
